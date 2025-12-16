@@ -25,16 +25,20 @@ GROUND_Y = HEIGHT - 60
 def load_image(filename: str) -> pg.Surface:
     """
     画像読み込み（fig/filename -> filename の順に探す）
+    ※displayが未生成のタイミングでも落ちないようにする
     """
     candidates = [os.path.join("fig", filename), filename]
     last_err = None
     for path in candidates:
         try:
-            return pg.image.load(path).convert_alpha()
+            img = pg.image.load(path)
+            # 画面が作られている時だけ convert_alpha する
+            if pg.display.get_init() and pg.display.get_surface() is not None:
+                img = img.convert_alpha()
+            return img
         except Exception as e:
             last_err = e
     raise SystemExit(f"画像 '{filename}' の読み込みに失敗しました: {last_err}")
-
 
 def check_bound(obj_rct: pg.Rect) -> tuple[bool, bool]:
     yoko, tate = True, True
@@ -74,13 +78,13 @@ def stage_params(stage: int) -> dict:
         return {
             "bg_file": "bg_1.jpg",
             "bg_speed": 4,
-            "enemy_speed": 7,
+            "enemy_speed": 5,
             "spawn_interval": 60,  # フレーム間隔
         }
     return {
         "bg_file": "bg_2.jpg",
         "bg_speed": 6,
-        "enemy_speed": 9,
+        "enemy_speed": 5,
         "spawn_interval": 45,
     }
 
@@ -91,9 +95,13 @@ def should_switch_stage(tmr: int) -> bool:
     """
     return tmr >= STAGE2_TMR
 
-
+#高柳変更
 def spawn_enemy(enemies: pg.sprite.Group, stage: int) -> None:
-    enemies.add(Enemy(stage))
+    params = stage_params(stage)
+    kind = random.choice(["ground", "air"])  # 地面敵 / 空中敵
+    enemies.add(Enemy(stage=stage, kind=kind, speed=params["enemy_speed"]))
+
+
 
 
 def detect_ground_y(bg_scaled: pg.Surface) -> int:
@@ -211,6 +219,11 @@ class Bird(pg.sprite.Sprite):
         self.rect.center = xy
         self.rect.bottom = get_ground_y()
 
+        # --- HP/無敵時間（追加） ---高柳
+        self.hp = 100
+        self._inv = 0   # 無敵フレーム（連続ダメ防止）
+
+
     def try_jump(self) -> None:
         if self._jump_count < self._max_jump:
             self._vy = self._jump_v0
@@ -225,6 +238,9 @@ class Bird(pg.sprite.Sprite):
         if key_lst[pg.K_RIGHT]:
             self._vx = +self._speed
             self._dir = +1
+        if self._inv > 0:
+            self._inv -= 1
+
 
         # 横移動
         self.rect.x += self._vx
@@ -254,41 +270,72 @@ class Bird(pg.sprite.Sprite):
 
     def get_speed(self) -> int:
         return self._speed
+    
+    #高柳追加
+    def take_damage(self, dmg: int) -> None:
+        """無敵中でなければダメージを受ける"""
+        if self._inv == 0:
+            self.hp = max(0, self.hp - dmg)
+            self._inv = 30  # 0.5秒くらい（60FPS想定）
+
+    def get_vy(self) -> float:
+        return self._vy
+
+    def set_vy(self, v: float) -> None:
+        self._vy = v
 
 
+#変更高柳
 class Enemy(pg.sprite.Sprite):
     """
-    敵：右端から左へ流れる（ダミー：赤い矩形）
-    ※当たり判定/HP/スコア/ボス等は追加機能なので一切入れない
+    モブ敵（2パターン）
+    - ground : 地面に沿って左へ流れる（ジャンプで踏める）
+    - air    : 空中を左へ流れる（踏める）
+    ステージ1: doragon1.png / gimen1.png
+    ステージ2: doragon2.png / gimen2.png
     """
-    def __init__(self, stage: int):
+    def __init__(self, stage: int, kind: str = "ground", speed: int = 7):
         super().__init__()
-        self._stage = stage
-        self._speed = stage_params(stage)["enemy_speed"]
+        self.stage = stage
+        self.kind = kind
 
-        w = random.randint(40, 70)
-        h = random.randint(40, 70)
-        self.image = pg.Surface((w, h), pg.SRCALPHA)
-        self.image.fill((230, 70, 70, 255))
+        # ステージごとの画像を選ぶ（UFO/alienは使わない）
+        if self.stage == 1:
+            img_file = "gimen1.png" if self.kind == "ground" else "doragon1.png"
+        else:
+            img_file = "gimen2.png" if self.kind == "ground" else "doragon2.png"
+
+        base = load_image(img_file)
+
+        # サイズ調整（必要なら数字だけ変えてOK）
+        scale = 0.25 if self.kind == "ground" else 0.25
+        self.image = pg.transform.rotozoom(base, 0, scale)
         self.rect = self.image.get_rect()
 
-        self.rect.left = WIDTH + random.randint(0, 160)
-        self.rect.bottom = get_ground_y()
+        # 右端から左へ流れる（地面と平行）
+        self.vx = -speed
+        self.vy = 0
+        self.rect.left = WIDTH + random.randint(0, 80)
+
+        gy = get_ground_y()
+        if self.kind == "ground":
+            self.rect.bottom = gy
+        else:
+            y = gy - random.randint(120, 260)
+            self.rect.bottom = max(40, y)
 
     def update(self):
-        self.rect.x -= self._speed
+        self.rect.move_ip(self.vx, self.vy)
 
-        # ステージ切替で ground_y が変わっても地面に合わせ続ける
-        self.rect.bottom = get_ground_y()
-
-        if self.rect.right < 0:
+        if (
+            self.rect.right < -50 or
+            self.rect.left > WIDTH + 50 or
+            self.rect.top > HEIGHT + 50
+        ):
             self.kill()
 
-    def get_rect(self) -> pg.Rect:
-        return self.rect
 
-    def get_speed(self) -> int:
-        return self._speed
+
 
 
 # =========================
@@ -298,6 +345,8 @@ def main():
     pg.display.set_caption("こうかとん横スクロール（ベース）")
     screen = pg.display.set_mode((WIDTH, HEIGHT))
     clock = pg.time.Clock()
+
+   
 
     stage = 1
     params = stage_params(stage)
@@ -327,6 +376,9 @@ def main():
             bg = Background(params["bg_file"], params["bg_speed"])
             # bird を新しい地面Yへ合わせる（めり込み/浮きを防ぐ）
             bird.get_rect().bottom = get_ground_y()
+            enemies.empty()  # ★ステージ1の敵を消して、以後は2の画像だけ出す
+
+
 
         # 敵生成：複数流入
         if tmr % params["spawn_interval"] == 0:
@@ -342,7 +394,23 @@ def main():
 
         bird.update(key_lst, screen)
         enemies.update()
+
+                # --- 敵との当たり判定 ---
+        hits = pg.sprite.spritecollide(bird, enemies, False)
+        for emy in hits:
+            if bird.get_vy() > 0 and (bird.rect.bottom - emy.rect.top) <= 20:
+                emy.kill()
+                bird.set_vy(-12)
+            else:
+                return 0
+
+
+        # HPが0ならゲーム終了（任意）
+        if bird.hp <= 0:
+            return 0
+
         enemies.draw(screen)
+
 
         pg.display.update()
         tmr += 1
