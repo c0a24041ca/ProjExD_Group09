@@ -30,24 +30,26 @@ BOX_W, BOX_H = 220, 110
 BOX_GAP = 14
 BOX_MARGIN = 20
 
-PERSIST_ITEM_LEVEL = False
-
 # =========================
 # クラス外関数（メモ準拠）
 # =========================
 def load_image(filename: str) -> pg.Surface:
     """
     画像読み込み（fig/filename -> filename の順に探す）
+    ※displayが未生成のタイミングでも落ちないようにする
     """
     candidates = [os.path.join("fig", filename), filename]
     last_err = None
     for path in candidates:
         try:
-            return pg.image.load(path).convert_alpha()
+            img = pg.image.load(path)
+            # 画面が作られている時だけ convert_alpha する
+            if pg.display.get_init() and pg.display.get_surface() is not None:
+                img = img.convert_alpha()
+            return img
         except Exception as e:
             last_err = e
     raise SystemExit(f"画像 '{filename}' の読み込みに失敗しました: {last_err}")
-
 
 def check_bound(obj_rct: pg.Rect) -> tuple[bool, bool]:
     yoko, tate = True, True
@@ -95,14 +97,14 @@ def stage_params(stage: int) -> dict[str, int | str]:
         return {
             "bg_file": "bg_1.jpg",
             "bg_speed": 4,
-            "enemy_speed": 7,
+            "enemy_speed": 5,
             "item_speed": 5,
             "spawn_interval": 60,  # フレーム間隔
         }
     return {
         "bg_file": "bg_2.jpg",
         "bg_speed": 6,
-        "enemy_speed": 9,
+        "enemy_speed": 5,
         "item_speed": 7,
         "spawn_interval": 45,
     }
@@ -114,9 +116,13 @@ def should_switch_stage(tmr: int) -> bool:
     """
     return tmr >= STAGE2_TMR
 
-
+#高柳変更
 def spawn_enemy(enemies: pg.sprite.Group, stage: int) -> None:
-    enemies.add(Enemy(stage))
+    params = stage_params(stage)
+    kind = random.choice(["ground", "air"])  # 地面敵 / 空中敵
+    enemies.add(Enemy(stage=stage, kind=kind, speed=params["enemy_speed"]))
+
+
 
 
 def detect_ground_y(bg_scaled: pg.Surface) -> int:
@@ -211,6 +217,11 @@ class Bird(pg.sprite.Sprite):
         self.rect.center = xy
         self.rect.bottom = get_ground_y()
 
+        # --- HP/無敵時間（追加） ---高柳
+        self.hp = 100
+        self._inv = 0   # 無敵フレーム（連続ダメ防止）
+
+
     def try_jump(self) -> None:
         if self._jump_count < self._max_jump:
             self._vy = self._jump_v0
@@ -225,6 +236,9 @@ class Bird(pg.sprite.Sprite):
         if key_lst[pg.K_RIGHT]:
             self._vx = +self._speed*0.5
             self._dir = +1
+        if self._inv > 0:
+            self._inv -= 1
+
 
         self.rect.x += self._vx
         self.rect = clamp_in_screen(self.rect)
@@ -252,33 +266,68 @@ class Bird(pg.sprite.Sprite):
 
     def get_speed(self) -> int:
         return self._speed
+    
+    #高柳追加
+    def take_damage(self, dmg: int) -> None:
+        """無敵中でなければダメージを受ける"""
+        if self._inv == 0:
+            self.hp = max(0, self.hp - dmg)
+            self._inv = 30  # 0.5秒くらい（60FPS想定）
+
+    def get_vy(self) -> float:
+        return self._vy
+
+    def set_vy(self, v: float) -> None:
+        self._vy = v
 
 
+#変更高柳
 class Enemy(pg.sprite.Sprite):
     """
-    右端から左へ流れる敵（現時点はダミー表示）。
-
-    注意:
-    - HP/スコア/ボスなどの仕様は“追加機能”側に分離する前提でここには含めない
-    - このクラスは「出現・移動・画面外で消滅」のみに責務を限定する
+    モブ敵（2パターン）
+    - ground : 地面に沿って左へ流れる（ジャンプで踏める）
+    - air    : 空中を左へ流れる（踏める）
+    ステージ1: doragon1.png / gimen1.png
+    ステージ2: doragon2.png / gimen2.png
     """
-    def __init__(self, stage: int):
+    def __init__(self, stage: int, kind: str = "ground", speed: int = 7):
         super().__init__()
-        self._speed = stage_params(stage)["enemy_speed"]
+        self.stage = stage
+        self.kind = kind
 
-        w = random.randint(40, 70)
-        h = random.randint(40, 70)
-        self.image = pg.Surface((w, h), pg.SRCALPHA)
-        self.image.fill((230, 70, 70, 255))
+        # ステージごとの画像を選ぶ（UFO/alienは使わない）
+        if self.stage == 1:
+            img_file = "enemy3.png" if self.kind == "ground" else "dagon.png"
+        else:
+            img_file = "enemy4.png" if self.kind == "ground" else "stennow.png"
+
+        base = load_image(img_file)
+
+        # サイズ調整（必要なら数字だけ変えてOK）
+        scale = 0.05 if self.kind == "ground" else 0.05
+        self.image = pg.transform.rotozoom(base, 0, scale)
         self.rect = self.image.get_rect()
 
-        self.rect.left = WIDTH + random.randint(0, 160)
-        self.rect.bottom = get_ground_y()
+        # 右端から左へ流れる（地面と平行）
+        self.vx = -speed
+        self.vy = 0
+        self.rect.left = WIDTH + random.randint(0, 80)
 
-    def update(self) -> None:
-        self.rect.x -= self._speed
-        self.rect.bottom = get_ground_y()
-        if self.rect.right < 0:
+        gy = get_ground_y()
+        if self.kind == "ground":
+            self.rect.bottom = gy
+        else:
+            y = gy - random.randint(120, 260)
+            self.rect.bottom = max(40, y)
+
+    def update(self):
+        self.rect.move_ip(self.vx, self.vy)
+
+        if (
+            self.rect.right < -50 or
+            self.rect.left > WIDTH + 50 or
+            self.rect.top > HEIGHT + 50
+        ):
             self.kill()
 
     def get_rect(self) -> pg.Rect:
@@ -286,6 +335,9 @@ class Enemy(pg.sprite.Sprite):
 
     def get_speed(self) -> int:
         return self._speed
+
+
+
     
 class Explosion(pg.sprite.Sprite):
     """
@@ -313,15 +365,17 @@ class Beam(pg.sprite.Sprite):
     - 発射位置から右方向へ直進
     - 画面外に出たら消滅
     """
+    RANGE_PX = 200  # ビーム到達距離（発射位置からの相対）
     def __init__(self, start_xy: tuple[int, int]):
         super().__init__()
         self.image = load_image("beam.png")
         self.rect = self.image.get_rect(center=start_xy)
         self._vx = 16
+        self._end_x = self.rect.centerx + self.RANGE_PX
 
     def update(self) -> None:
         self.rect.x += self._vx
-        if self.rect.left > WIDTH:
+        if self.rect.left >= self._end_x:
             self.kill()
 
 class Arrow(pg.sprite.Sprite):
@@ -335,8 +389,8 @@ class Arrow(pg.sprite.Sprite):
         self.image = pg.transform.rotozoom(self._base_image, 0, 0.2)
         self.rect = self.image.get_rect(center=start_xy)
 
-        self._vx = 14
-        self._vy = -7.0
+        self._vx = 16
+        self._vy = -10.5
         self._g = 0.6
 
         self._angle = 0.0  # 現在角度（無駄な回転を減らす用）
@@ -416,45 +470,27 @@ class Inventory:
     仕様:
     - 攻撃アイテムは1つだけ保持（attackスロット）
     - 状態アイテムは1つだけ保持（statusスロット）
-    - 同じ item_id を再取得すると、その item_id のレベルを +1
     - 同カテゴリで別 item_id を取得した場合は、後から取った方で置換する
-      （レベルは PERSIST_ITEM_LEVEL の設定に従う）
     """
     def __init__(self, item_defs: dict[str, ItemDef]):
         self._defs = item_defs
         self._attack_id = None
         self._status_id = None
-        self._levels = {}  # item_id -> level
 
     def pickup_attack(self, item_id: str) -> None:
-        if self._attack_id == item_id:
-            self._levels[item_id] = self._levels.get(item_id, 1) + 1
-        else:
-            self._attack_id = item_id
-            if (not PERSIST_ITEM_LEVEL) or (item_id not in self._levels):
-                self._levels[item_id] = 1
+        self._attack_id = item_id
 
     def pickup_status_basic(self, item_id: str) -> None:
-        # 特殊ルールは外で処理（tabaco/kinoko）
-        if self._status_id == item_id:
-            self._levels[item_id] = self._levels.get(item_id, 1) + 1
-        else:
-            self._status_id = item_id
-            if (not PERSIST_ITEM_LEVEL) or (item_id not in self._levels):
-                self._levels[item_id] = 1
+        self._status_id = item_id
 
     def clear_status(self) -> None:
         self._status_id = None
 
-    def get_attack(self) -> tuple[str | None, int]:
-        if self._attack_id is None:
-            return None, 0
-        return self._attack_id, self._levels.get(self._attack_id, 1)
+    def get_attack(self) -> str | None:
+        return self._attack_id
 
-    def get_status(self) -> tuple[str | None, int]:
-        if self._status_id is None:
-            return None, 0
-        return self._status_id, self._levels.get(self._status_id, 1)
+    def get_status(self) -> str | None:
+        return self._status_id
     
 class Item(pg.sprite.Sprite):
     """
@@ -572,7 +608,7 @@ def apply_status_pickup(item_id: str, inv: Inventory, bird: Bird) -> None:
     - inv の状態スロット（status）を書き換える
     - bird の最大ジャンプ回数を変更する
     """
-    cur_status, cur_lv = inv.get_status()
+    cur_status = inv.get_status()
 
     if item_id == "tabaco":
         inv.pickup_status_basic("tabaco")
@@ -597,7 +633,7 @@ def apply_status_from_current(inv: Inventory, bird: Bird) -> None:
     """
     ステージ切替などで、現在の所持状態に合わせてジャンプ数を再適用したい場合用
     """
-    st, lv = inv.get_status()
+    st = inv.get_status()
     if st == "tabaco":
         bird.set_max_jump(1)
     elif st == "kinoko":
@@ -613,6 +649,8 @@ def main():
     pg.display.set_caption("こうかとん横スクロール（ベース）")
     screen = pg.display.set_mode((WIDTH, HEIGHT))
     clock = pg.time.Clock()
+
+   
 
     stage = 1
     params = stage_params(stage)
@@ -634,6 +672,17 @@ def main():
         "tabaco": ItemDef("tabaco", "status", "tabaco.png", weight=2, scale=0.03),
     }
     inv = Inventory(ITEM_DEFS)
+
+    UI_ICON_SIZE = 52
+
+    def make_ui_icon(item_id: str) -> pg.Surface:
+        img = load_image(ITEM_DEFS[item_id].get_img_file())
+        w, h = img.get_size()
+        s = UI_ICON_SIZE / max(w, h)
+        nw, nh = max(1, int(w * s)), max(1, int(h * s))
+        return pg.transform.smoothscale(img, (nw, nh))
+
+    UI_ICONS = {item_id: make_ui_icon(item_id) for item_id in ITEM_DEFS.keys()}    
 
     # ===== 他の人のアイテムGroupを受け取る場所 =====
     # 統合するときは、次の1行を「相手が作った items（pg.sprite.Group）」に差し替えるだけでOK
@@ -719,7 +768,7 @@ def main():
                     bird.try_jump()
                 
                 if event.key == pg.K_SPACE:
-                    atk_id, atk_lv = inv.get_attack()
+                    atk_id = inv.get_attack()
                     # 何も持ってなければ撃てない
                     if atk_id == "Beam":
                         beams.add(Beam((bird.get_rect().right + 30, bird.get_rect().centery)))
@@ -733,6 +782,9 @@ def main():
             bg = Background(params["bg_file"], params["bg_speed"])
             bird.get_rect().bottom = get_ground_y()
             apply_status_from_current(inv, bird)
+            enemies.empty()  # ★ステージ1の敵を消して、以後は2の画像だけ出す
+
+
 
         # 敵生成：複数流入（変更なし）
         if tmr % params["spawn_interval"] == 0:
@@ -758,10 +810,13 @@ def main():
         hit1 = pg.sprite.groupcollide(enemies, beams, True, True) # ビーム当たり判定
         for emy in hit1.keys():
             exps.add(Explosion(emy.get_rect().center, life=30))
+            score += random.randint(10,20)  # スコア加算
 
         hit2 = pg.sprite.groupcollide(enemies, arrows, True, True) # 矢当たり判定
         for emy in hit2.keys():
             exps.add(Explosion(emy.get_rect().center, life=30))
+            score += random.randint(10,20)  # スコア加算
+
         picked = pg.sprite.spritecollide(bird, items, True) # アイテム取得判定
         for it in picked:
             item_id = it.get_item_id()
@@ -791,17 +846,14 @@ def main():
             dmg_popup_tmr = POPUP_FRAMES
             inv_tmr = INV_FRAMES
 
-        # ===== アイテム取得（触れたら取得→右下表示を置き換え）=====
-        got_items = pg.sprite.spritecollide(bird, items, True)  # True=拾ったら消える
-        for it in got_items:
-            kind, name = read_item_info(it)
-            if kind == "attack":
-                current_attack = name if name is not None else "Unknown"
-            elif kind == "status":
-                current_status = name if name is not None else "Unknown"
-
         # 描画（スプライト）
         items.draw(screen)
+
+
+        # HPが0ならゲーム終了（任意）
+        if bird.hp <= 0:
+            return 0
+
         enemies.draw(screen)
         items.draw(screen)
         beams.draw(screen)
@@ -844,12 +896,48 @@ def main():
         screen.blit(atk_label, (attack_box.x + 10, attack_box.y + 8))
         screen.blit(sta_label, (status_box.x + 10, status_box.y + 8))
 
-        atk_name = current_attack if current_attack is not None else "-"
-        sta_name = current_status if current_status is not None else "-"
-        atk_text = font_item.render(atk_name, True, (255, 255, 255))
-        sta_text = font_item.render(sta_name, True, (255, 255, 255))
-        screen.blit(atk_text, (attack_box.x + 12, attack_box.y + 40))
-        screen.blit(sta_text, (status_box.x + 12, status_box.y + 40))
+        # ---- invから現在装備を取得 ----
+        atk_id = inv.get_attack()
+        sta_id = inv.get_status()
+
+        def draw_slot(box: pg.Rect, item_id: str | None) -> None:
+            # 表示エリア（ラベルの下）
+            pad_x = 12
+            top_y = box.y + 34
+            area = pg.Rect(box.x + pad_x, top_y, box.w - pad_x * 2, box.h - (top_y - box.y) - 10)
+
+            if item_id is None:
+                txt = font_item.render("-", True, (255, 255, 255))
+                screen.blit(txt, (area.x, area.y + 10))
+                return
+
+            # アイコン
+            icon = UI_ICONS[item_id]
+            icon_y = area.y + (area.h - icon.get_height()) // 2
+            screen.blit(icon, (area.x, icon_y))
+
+            # 名前（長い場合は枠内に収まるように省略）
+            name_x = area.x + icon.get_width() + 10
+            max_w = area.right - name_x
+
+            name_str = item_id
+            txt = font_item.render(name_str, True, (255, 255, 255))
+            if txt.get_width() > max_w:
+                # 末尾を「...」にして収める
+                base = name_str
+                while len(base) > 1:
+                    base = base[:-1]
+                    name_str = base + "..."
+                    txt = font_item.render(name_str, True, (255, 255, 255))
+                    if txt.get_width() <= max_w:
+                        break
+
+            name_y = area.y + (area.h - txt.get_height()) // 2
+            screen.blit(txt, (name_x, name_y))
+
+        # 描画
+        draw_slot(attack_box, atk_id)
+        draw_slot(status_box, sta_id)
 
         pg.display.update()
         
