@@ -1,24 +1,18 @@
 import os
 import sys
 import random
+import math
 import pygame as pg
 import math
 
 WIDTH = 1100
 HEIGHT = 650
 FPS = 60
-
-# デバッグ：地面ラインを表示するなら True
 DEBUG_DRAW_GROUND_LINE = True
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
-# ステージ2へ移行するフレーム（仕様に明記が無いので仮定：25秒相当）
-STAGE2_TMR = 1500  # 60FPS想定
-
-# グローバル（現在ステージの接地Y）
+STAGE2_TMR = 1500 
 GROUND_Y = HEIGHT - 60
-
 # ===== HP/ダメージ（追加）=====
 HP_MAX = 100
 DMG = 20
@@ -31,7 +25,7 @@ BOX_GAP = 14
 BOX_MARGIN = 20
 
 # =========================
-# クラス外関数（メモ準拠）
+# クラス外関数
 # =========================
 def load_image(filename: str) -> pg.Surface:
     """
@@ -69,11 +63,7 @@ def clamp_in_screen(rect: pg.Rect) -> pg.Rect:
 
 
 def get_ground_y() -> int:
-    """
-    現在ステージの地面Y
-    """
     return GROUND_Y
-
 
 def set_ground_y(v: int) -> None:
     global GROUND_Y
@@ -138,7 +128,6 @@ def detect_ground_y(bg_scaled: pg.Surface) -> int:
     x_step = 4
     best_y = int(h * 0.75)
     best_score = 10**18
-
     for y in range(y_start, y_end):
         s = 0.0
         s2 = 0.0
@@ -161,14 +150,93 @@ def detect_ground_y(bg_scaled: pg.Surface) -> int:
 
     return min(h - 1, best_y + 1)
 
-
 # =========================
 # クラス
 # =========================
+
+class Beam_tbos(pg.sprite.Sprite):
+    """中ボスが放つビーム"""
+    def __init__(self, pos: tuple[int, int]):
+        super().__init__()
+        raw_image = load_image("Beam_tbos.png")
+        self.image = pg.transform.smoothscale(raw_image, (200, 80))
+        self.rect = self.image.get_rect(center=pos)
+        self._speed = 15
+
+    def update(self):
+        self.rect.x -= self._speed
+        if self.rect.right < 0:
+            self.kill()
+
+    def get_rect(self) -> pg.Rect:
+        return self.rect
+
+
+class Meteor(pg.sprite.Sprite):
+    """中ボスが降らせる隕石"""
+    def __init__(self, target_x: int):
+        super().__init__()
+        size = random.randint(50, 150)
+        raw_image = load_image("Meteor.png")
+        self.image = pg.transform.smoothscale(raw_image, (size, size))
+        self.rect = self.image.get_rect(center=(target_x, -50))
+        self._speed_y = 6
+
+    def update(self):
+        self.rect.y += self._speed_y
+        if self.rect.top > HEIGHT:
+            self.kill()
+
+    def get_rect(self) -> pg.Rect:
+        return self.rect
+
+
+class MidBoss(pg.sprite.Sprite):
+    """
+    中ボス：画面右側に滞在し、ビームと隕石で攻撃
+    """
+    def __init__(self):
+        super().__init__()
+        raw_image = load_image("Ramieru.png")
+        self.image = pg.transform.smoothscale(raw_image, (300, 300))
+        self.rect = self.image.get_rect()
+        self.rect.center = (WIDTH - 150, get_ground_y() - 200)
+        
+        self._timer = 0
+        self.hp = 500
+        self._hp = 100 # 追加機能と連携可能
+
+    def update(self, bird_rect: pg.Rect, beams_tbos: pg.sprite.Group, meteors: pg.sprite.Group):
+        self._timer += 1
+
+        # 【上下移動の計算】
+        # math.sin を使うことで滑らかな波のような動きにする
+        # 0.05 を変えると速さが、100 を変えると揺れ幅が変わる
+        move_y = math.sin(self._timer * 0.05) * 100
+
+        # 基準点（地面の高さ）を更新しつつ、計算した揺れを加算する
+        self._base_y = get_ground_y() - 250
+        self.rect.centery = self._base_y + move_y
+
+        # ビーム発射（1.5秒に1回）
+        if self._timer % 90 == 0:
+            beams_tbos.add(Beam_tbos(self.rect.center))
+
+        # 隕石落下（2秒に1回、こうかとんの頭上に降らす）
+        if self._timer % 120 == 0:
+            meteors.add(Meteor(bird_rect.centerx))
+
+    def get_rect(self) -> pg.Rect:
+        return self.rect
+
+    def get_hp(self) -> int:
+        return self._hp
+
+# =========================
+# 既存クラス
+# =========================
+
 class Background:
-    """
-    背景を右→左へ強制スクロール（2枚並べてループ）
-    """
     def __init__(self, bg_file: str, speed: int):
         raw = load_image(bg_file)
         self._img = pg.transform.smoothscale(raw, (WIDTH, HEIGHT))
@@ -180,14 +248,13 @@ class Background:
     def update(self, screen: pg.Surface):
         self._x1 -= self._speed
         self._x2 -= self._speed
-
-        if self._x1 <= -WIDTH:
-            self._x1 = self._x2 + WIDTH
-        if self._x2 <= -WIDTH:
-            self._x2 = self._x1 + WIDTH
-
+        if self._x1 <= -WIDTH: self._x1 = self._x2 + WIDTH
+        if self._x2 <= -WIDTH: self._x2 = self._x1 + WIDTH
         screen.blit(self._img, (self._x1, 0))
         screen.blit(self._img, (self._x2, 0))
+
+    def get_speed(self) -> int:
+        return self._speed
 
 
 class Bird(pg.sprite.Sprite):
@@ -198,7 +265,6 @@ class Bird(pg.sprite.Sprite):
         super().__init__()
         img0 = pg.transform.rotozoom(load_image(f"{num}.png"), 0, 0.9)
         img = pg.transform.flip(img0, True, False)
-
         self._imgs = {+1: img, -1: img0}
         self._dir = +1
 
@@ -221,14 +287,21 @@ class Bird(pg.sprite.Sprite):
         self.hp = 100
         self._inv = 0   # 無敵フレーム（連続ダメ防止）
 
+        self._vx, self._vy = 0, 0.0
+        self._speed, self._gravity = 8, 0.85
+        self._jump_v0, self._jump_count, self._max_jump = -15, 0, 2
+        self._damage_tmr = 0  # 追加：ダメージ点滅用タイマー
 
-    def try_jump(self) -> None:
+    def set_damage(self):
+            #"""追加：ダメージを受けたときにタイマーをセットする"""
+            self._damage_tmr = 30  # 30フレーム（約0.5秒）点滅させる
+
+    def try_jump(self):
         if self._jump_count < self._max_jump:
             self._vy = self._jump_v0
             self._jump_count += 1
 
     def update(self, key_lst: list[bool], screen: pg.Surface) -> None:
-        # 左右入力
         self._vx = 0
         if key_lst[pg.K_LEFT]:
             self._vx = -self._speed
@@ -251,6 +324,15 @@ class Bird(pg.sprite.Sprite):
             self.rect.bottom = gy
             self._vy = 0.0
             self._jump_count = 0
+
+            self.rect.bottom, self._vy, self._jump_count = gy, 0.0, 0
+
+        # 追加：ダメージ点滅ロジック
+        if self._damage_tmr > 0:
+            self._damage_tmr -= 1
+            # 2フレームに1回描画しない時間を作ることで点滅させる
+            if self._damage_tmr % 4 < 2:
+                return # 描画せずに終了（点滅の「消える」瞬間）
 
         self.image = self._imgs[self._dir]
         screen.blit(self.image, self.rect)
@@ -368,7 +450,7 @@ class Beam(pg.sprite.Sprite):
     RANGE_PX = 200  # ビーム到達距離（発射位置からの相対）
     def __init__(self, start_xy: tuple[int, int]):
         super().__init__()
-        self.image = load_image("beam.png")
+        self.image = load_image("beam_k.png")
         self.rect = self.image.get_rect(center=start_xy)
         self._vx = 16
         self._end_x = self.rect.centerx + self.RANGE_PX
@@ -519,10 +601,13 @@ class Item(pg.sprite.Sprite):
         gy = get_ground_y()
         margin = 10
         lowest = gy - (self.rect.height // 2) - margin   # これより下に出さない
-        highest = 60                                     # これより上に出さない（画面上部）
+        highest = max(60,self.rect.height // 2 + margin)                                     # これより上に出さない（画面上部）
 
-        highest = max(highest, self.rect.height // 2 + margin)
-        self.rect.centery = random.randint(highest, lowest)
+        if highest > lowest:
+            self.rect.centery = (highest + lowest) // 2
+        else:
+            self.rect.centery = random.randint(highest, lowest)
+
 
     def update(self) -> None:
         self.rect.x -= self._speed
@@ -646,7 +731,7 @@ def apply_status_from_current(inv: Inventory, bird: Bird) -> None:
 # メイン
 # =========================
 def main():
-    pg.display.set_caption("こうかとん横スクロール（ベース）")
+    pg.display.set_caption("こうかとん横スクロール（中ボス追加）")
     screen = pg.display.set_mode((WIDTH, HEIGHT))
     clock = pg.time.Clock()
 
@@ -654,18 +739,19 @@ def main():
 
     stage = 1
     params = stage_params(stage)
-
     bg = Background(params["bg_file"], params["bg_speed"])
     bird = Bird(3, (200, get_ground_y()))
+    
     enemies = pg.sprite.Group()
     items = pg.sprite.Group()
     beams = pg.sprite.Group()
+    beams_tbos = pg.sprite.Group()
     arrows = pg.sprite.Group()
     exps = pg.sprite.Group()
 
     ITEM_DEFS = {
         # 攻撃
-        "Beam":  ItemDef("Beam",  "attack", "beam.png",  weight=5, scale=1.0),
+        "Beam":  ItemDef("Beam",  "attack", "beam_k.png",  weight=5, scale=1.0),
         "arrow":   ItemDef("arrow",   "attack", "arrow.png",   weight=3, scale=0.2),
         # 状態
         "kinoko": ItemDef("kinoko", "status", "kinoko.png", weight=4, scale=0.1),
@@ -690,7 +776,7 @@ def main():
 
     # ===== HP/Score/UI =====
     hp = HP_MAX
-    score = 0
+    score = 5600
     font = pg.font.Font(None, 36)
     dmg_popup_tmr = 0
     inv_tmr = 0
@@ -753,19 +839,20 @@ def main():
                 surf.blit(outline, (x + ox, y + oy))
         body = font_.render(text, True, text_color)
         surf.blit(body, (x, y))
+    boss_group = pg.sprite.Group()
+    beams_tbos = pg.sprite.Group()
+    meteors = pg.sprite.Group()
 
     tmr = 0
+    mid_boss_spawned = False
+    mid_boss_defeated = False
     while True:
         key_lst = pg.key.get_pressed()
-
         for event in pg.event.get():
-            if event.type == pg.QUIT:
-                return 0
+            if event.type == pg.QUIT: return
             if event.type == pg.KEYDOWN:
-                if event.key == pg.K_ESCAPE:
-                    return 0
-                if event.key == pg.K_UP:
-                    bird.try_jump()
+                if event.key == pg.K_ESCAPE: return
+                if event.key == pg.K_UP: bird.try_jump()
                 
                 if event.key == pg.K_SPACE:
                     atk_id = inv.get_attack()
@@ -775,8 +862,8 @@ def main():
                     elif atk_id == "arrow":
                         arrows.add(Arrow((bird.get_rect().right + 30, bird.get_rect().centery)))
 
-        # ステージ切替（全2ステージ）
-        if stage == 1 and should_switch_stage(tmr):
+        # ステージ遷移
+        if stage == 1 and tmr >= STAGE2_TMR:
             stage = 2
             params = stage_params(stage)
             bg = Background(params["bg_file"], params["bg_speed"])
@@ -787,14 +874,20 @@ def main():
 
 
         # 敵生成：複数流入（変更なし）
-        if tmr % params["spawn_interval"] == 0:
-            spawn_enemy(enemies, stage)
-            if random.random() < 0.30:
-                spawn_enemy(enemies, stage)
+        if not mid_boss_spawned:
+            if tmr % params["spawn_interval"] == 0:
+                if random.random() <0.93:
+                    spawn_enemy(enemies, stage)
+
+        if score > 500 and not mid_boss_spawned and not mid_boss_defeated:
+            mid_boss_spawned = True
+            enemies.empty()          # ★ モブ全消去
+            boss_group.add(MidBoss())
+
 
         maybe_spawn_item(tmr, stage, ITEM_DEFS, items)
 
-        # ===== 描画（速度など変更なし）=====
+        # 更新
         bg.update(screen)
         if DEBUG_DRAW_GROUND_LINE:
             pg.draw.line(screen, (0, 0, 0), (0, get_ground_y()), (WIDTH, get_ground_y()), 2)
@@ -804,6 +897,7 @@ def main():
         enemies.update()
         items.update()
         beams.update()
+        beams_tbos.update()
         arrows.update()
         exps.update()
 
@@ -857,6 +951,7 @@ def main():
         enemies.draw(screen)
         items.draw(screen)
         beams.draw(screen)
+        beams_tbos.draw(screen)
         arrows.draw(screen)
         exps.draw(screen)
 
@@ -938,15 +1033,77 @@ def main():
         # 描画
         draw_slot(attack_box, atk_id)
         draw_slot(status_box, sta_id)
+        
+        if mid_boss_spawned:
+            boss = boss_group.sprites()[0]
 
+        # HPテキスト
+        hp_text = font.render(f"HP:{boss.hp}", True, (255, 255, 255))
+        screen.blit(
+            hp_text,
+            (boss.rect.centerx - hp_text.get_width() // 2,
+             boss.rect.top - 30)
+        )
+
+
+        # 【中ボスの更新・描画エリア】
+        if mid_boss_spawned:
+            # プレイヤーの位置（bird.get_rect()）を渡して、狙いを定めさせる
+            boss_group.update(bird.get_rect(), beams_tbos, meteors)
+            
+            # ビームと隕石も一緒に更新
+            beams_tbos.update()
+            meteors.update()
+            
+            # まとめて描画
+            boss_group.draw(screen)
+            beams_tbos.draw(screen)
+            meteors.draw(screen)
+
+            # ビームとの衝突判定（当たったらビームを消す）
+        if pg.sprite.spritecollide(bird, beams_tbos, True):
+            print("ビームがヒット！")  # ログ出力(仮)
+            bird.set_damage()  # 追加：点滅開始
+
+
+        # 隕石との衝突判定（当たったら隕石を消す）
+        if pg.sprite.spritecollide(bird, meteors, True):
+            print("隕石がヒット！")  # ログ出力(仮)
+            bird.set_damage()  # 追加：点滅開始
+
+        if mid_boss_spawned:
+            boss = boss_group.sprites()[0]
+
+            # ---- ビーム命中 ----
+            hit_beams = pg.sprite.spritecollide(boss, beams, True)
+            if hit_beams:
+                boss.hp -= 100 * len(hit_beams)
+
+            # ---- 矢命中 ----
+            hit_arrows = pg.sprite.spritecollide(boss, arrows, True)
+            if hit_arrows:
+                boss.hp -= 80 * len(hit_arrows)
+
+            # ---- 撃破判定 ----
+            if boss.hp <= 0:
+                exps.add(Explosion(boss.rect.center, life=60))
+
+                boss.kill()                 # 中ボス消滅
+                boss_group.empty()          # 念のため完全削除
+                beams_tbos.empty()          # 中ボスビーム消去
+                meteors.empty()             # 隕石消去
+
+                mid_boss_spawned = False    # フラグOFF
+                mid_boss_defeated = True
+                score += 1000               # 撃破ボーナス
+
+                
         pg.display.update()
         
         tmr += 1
         clock.tick(FPS)
 
-
 if __name__ == "__main__":
     pg.init()
     main()
     pg.quit()
-    sys.exit()
